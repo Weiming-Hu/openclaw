@@ -25,7 +25,7 @@ export type AutoResponseSpeaker = {
  * Rate limiting is named specifically, so "try again in a little while" is
  * actionable rather than a guess.
  */
-export function generationFailureNotice(detail: string): string {
+function generationFailureNotice(detail: string): string {
   return /\b429\b|rate.?limit|too many requests/i.test(detail)
     ? "Sorry, my language service is rate limited right now, so I can't answer that. Please try again in a little while."
     : "Sorry, I hit a problem working out a response. Please try again.";

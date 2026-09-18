@@ -539,11 +539,18 @@ export async function generateVoiceResponse(
           return { text: null, deliveredEarly, error: "Response generation was aborted" };
         }
 
-        if (!text && (result.payloads?.length ?? 0) === 0) {
-          // The provider failed or refused with no output at all, for example an
-          // HTTP 429. Report it as an error so the caller is told something went
-          // wrong instead of being left in dead air. A turn where the model
-          // intentionally stays silent still carries payloads, so deliberate
+        const hasSpeakablePayload = ((result.payloads ?? []) as VoiceResponsePayload[]).some(
+          (payload) =>
+            !payload.isError && !payload.isReasoning && (payload.text?.trim() ?? "") !== "",
+        );
+        if (!text && !hasSpeakablePayload) {
+          // The provider failed or refused without producing anything the caller
+          // could hear: no payloads at all, or only error/reasoning payloads,
+          // which the extractor filters out. Report it as an error so the caller
+          // is told something went wrong instead of being left in dead air.
+          //
+          // A turn where the model intentionally stays silent still carries a
+          // speakable payload (the `{"spoken":""}` text itself), so deliberate
           // silence does not reach this branch.
           return {
             text: null,

@@ -592,6 +592,26 @@ describe("generateVoiceResponse", () => {
     expect(result.text).toBe("Fenced JSON works.");
   });
 
+  it("speaks a multi-paragraph spoken contract response", async () => {
+    const { result } = await runGenerateVoiceResponse([
+      { text: '{"spoken":"First paragraph.\n\nSecond paragraph.\n\nThird paragraph."}' },
+    ]);
+
+    expect(result.text).toBe("First paragraph. Second paragraph. Third paragraph.");
+  });
+
+  it("merges concatenated multi-paragraph spoken blocks", async () => {
+    const { result } = await runGenerateVoiceResponse([
+      {
+        text:
+          '{"spoken":"Block one.\n\nStill block one."}' +
+          '{"spoken":"Block two.\n\nStill block two."}',
+      },
+    ]);
+
+    expect(result.text).toBe("Block one. Still block one. Block two. Still block two.");
+  });
+
   it("returns silence for an explicit empty spoken contract response", async () => {
     const { result } = await runGenerateVoiceResponse([{ text: '{"spoken":""}' }]);
 

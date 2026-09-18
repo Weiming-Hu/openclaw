@@ -612,6 +612,15 @@ describe("generateVoiceResponse", () => {
     expect(result.text).toBe("Block one. Still block one. Block two. Still block two.");
   });
 
+  it("speaks every block when the model concatenates spoken objects", async () => {
+    const { result } = await runGenerateVoiceResponse([
+      { text: '{"spoken":"Block one."}{"spoken":"Block two."}' },
+    ]);
+
+    // Baseline returned only "Block one.": the inline scan was not global.
+    expect(result.text).toBe("Block one. Block two.");
+  });
+
   it("returns silence for an explicit empty spoken contract response", async () => {
     const { result } = await runGenerateVoiceResponse([{ text: '{"spoken":""}' }]);
 

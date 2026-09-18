@@ -539,6 +539,7 @@ export async function generateVoiceResponse(
           return { text: null, deliveredEarly, error: "Response generation was aborted" };
         }
 
+        // SAFETY: same run payloads the extractor above already reads as VoiceResponsePayload[].
         const hasSpeakablePayload = ((result.payloads ?? []) as VoiceResponsePayload[]).some(
           (payload) =>
             !payload.isError && !payload.isReasoning && (payload.text?.trim() ?? "") !== "",

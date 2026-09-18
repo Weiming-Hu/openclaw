@@ -536,7 +536,20 @@ export async function generateVoiceResponse(
           extractSpokenTextFromPayloads(blockReplyPayloads);
 
         if (!text && result.meta?.aborted) {
-          return { text: null, deliveredEarly: false, error: "Response generation was aborted" };
+          return { text: null, deliveredEarly, error: "Response generation was aborted" };
+        }
+
+        if (!text && (result.payloads?.length ?? 0) === 0) {
+          // The provider failed or refused with no output at all, for example an
+          // HTTP 429. Report it as an error so the caller is told something went
+          // wrong instead of being left in dead air. A turn where the model
+          // intentionally stays silent still carries payloads, so deliberate
+          // silence does not reach this branch.
+          return {
+            text: null,
+            deliveredEarly,
+            error: "Response generation produced no output",
+          };
         }
 
         return { text, deliveredEarly };

@@ -1117,6 +1117,10 @@ export class VoiceCallWebhookServer {
     }
 
     const response = this.manager.createAutoResponseGuard(call);
+    // Authoritative record of whether the caller actually heard anything on this
+    // turn. The generator reports its own view, but an early handoff can succeed
+    // before a later failure, so delivery is tracked at the point of delivery.
+    let deliveredAnySpeech = false;
     const speakResponse = async (text: string): Promise<boolean> => {
       if (!response.isCurrent()) {
         this.logger.info(`Discarding superseded automatic reply ${callId}`);
@@ -1127,7 +1131,27 @@ export class VoiceCallWebhookServer {
         listenAfterPlayback: true,
         isCurrent: response.isCurrent,
       });
+      if (result.success) {
+        deliveredAnySpeech = true;
+      }
       return result.success;
+    };
+    const speakGenerationFailure = async (detail: string): Promise<void> => {
+      // Never contradict speech the caller already heard: a failure after a
+      // successful early handoff stays silent rather than apologising for an
+      // answer that was in fact delivered.
+      if (deliveredAnySpeech) {
+        return;
+      }
+      const rateLimited = /\b429\b|rate.?limit|too many requests/i.test(detail);
+      const apology = rateLimited
+        ? "Sorry, my language service is rate limited right now, so I can't answer that. Please try again in a little while."
+        : "Sorry, I hit a problem working out a response. Please try again.";
+      try {
+        await speakResponse(apology);
+      } catch (err) {
+        this.logger.warn(`Failed to speak generation failure notice ${callId}: ${String(err)}`);
+      }
     };
     try {
       const { generateVoiceResponse } = await loadResponseGeneratorModule();
@@ -1153,6 +1177,7 @@ export class VoiceCallWebhookServer {
 
       if (result.error) {
         this.logger.error(`Response generation error: ${result.error}`);
+        await speakGenerationFailure(result.error);
         return;
       }
 
@@ -1161,6 +1186,7 @@ export class VoiceCallWebhookServer {
       }
     } catch (err) {
       this.logger.error(`Auto-response error: ${String(err)}`);
+      await speakGenerationFailure(String(err));
     } finally {
       response.release();
     }

@@ -160,7 +160,7 @@ function normalizeProviderConfig(
     encoding: normalizeDeepgramEncoding(raw.encoding),
     interimResults: readBoolean(raw.interimResults ?? raw.interim_results),
     endpointingMs: readFiniteNumber(raw.endpointingMs ?? raw.endpointing ?? raw.silenceDurationMs),
-    idleFlushMs: readFiniteNumber(raw.idleFlushMs ?? raw.idleFlush ?? raw.idle_flush_ms),
+    idleFlushMs: readFiniteNumber(raw.idleFlushMs),
   };
 }
 

@@ -138,6 +138,7 @@ for the Voice Call plugin.
 | Encoding        | `...deepgram.encoding`                                                  | `mulaw`                                      |
 | Sample rate     | `...deepgram.sampleRate`                                                | `8000`                                       |
 | Endpointing     | `...deepgram.endpointingMs`                                             | `800`                                        |
+| Idle flush      | `...deepgram.idleFlushMs`                                               | `1000`                                       |
 | Interim results | `...deepgram.interimResults`                                            | `true`                                       |
 
 ```json5
@@ -154,6 +155,7 @@ for the Voice Call plugin.
                 apiKey: "${DEEPGRAM_API_KEY}",
                 model: "nova-3",
                 endpointingMs: 800,
+                idleFlushMs: 1000,
                 language: "en-US",
               },
             },

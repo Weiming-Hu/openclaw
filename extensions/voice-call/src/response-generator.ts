@@ -204,6 +204,7 @@ function tryParseSpokenJson(text: string): string | null {
   const inlineSpokenSegments: string[] = [];
   let sawInlineSpoken = false;
   let sawUndecodableSegment = false;
+  let foldedControlChars = false;
   for (const inlineMatch of trimmed.matchAll(/"spoken"\s*:\s*"((?:[^"\\]|\\.)*)"/gi)) {
     sawInlineSpoken = true;
     try {
@@ -211,7 +212,11 @@ function tryParseSpokenJson(text: string): string | null {
       // string, which are illegal control characters there and make the
       // decode throw. normalizeSpokenText collapses whitespace anyway, so
       // folding them to spaces preserves the spoken text exactly.
-      const escaped = (inlineMatch[1] ?? "").replace(SPOKEN_CONTROL_CHARS, " ");
+      const rawSegment = inlineMatch[1] ?? "";
+      const escaped = rawSegment.replace(SPOKEN_CONTROL_CHARS, " ");
+      if (escaped !== rawSegment) {
+        foldedControlChars = true;
+      }
       const decoded = JSON.parse(`"${escaped}"`) as string;
       const normalized = normalizeSpokenText(decoded);
       if (normalized) {
@@ -225,6 +230,14 @@ function tryParseSpokenJson(text: string): string | null {
   }
 
   if (inlineSpokenSegments.length > 0) {
+    // Lengths only: spoken content must never reach the log. Recovery is
+    // otherwise invisible, so this is the only way an operator can tell a
+    // malformed reply was salvaged rather than silently dropped.
+    console.log(
+      `[voice-call] Recovered spoken text from ${inlineSpokenSegments.length} inline segment(s) [${inlineSpokenSegments
+        .map((segment) => segment.length)
+        .join(", ")}] controlCharsFolded=${foldedControlChars}`,
+    );
     return inlineSpokenSegments.join(" ");
   }
   // Only report deliberate silence when every segment decoded cleanly to an

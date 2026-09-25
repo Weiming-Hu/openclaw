@@ -592,11 +592,14 @@ describe("generateVoiceResponse", () => {
     expect(result.text).toBe("Fenced JSON works.");
   });
 
-  it("reports an error when the run produces no payloads at all", async () => {
-    const { result } = await runGenerateVoiceResponse([]);
-
-    expect(result.text).toBeNull();
-    expect(result.error).toBe("Response generation produced no output");
+  it("reports an error when a run yields nothing the caller could hear", async () => {
+    // Two shapes leave nothing to say: no payloads at all, and a payload whose
+    // entire body sanitizing removes. Neither may pass as deliberate silence,
+    // or the turn ends in dead air instead of a spoken failure notice.
+    for (const payloads of [[], [{ text: "```js\nconst x = 1;\n```" }]]) {
+      const { result } = await runGenerateVoiceResponse(payloads);
+      expect(result.error).toBe("Response generation produced no output");
+    }
   });
 
   it("reports an error when the run produces only an error payload", async () => {

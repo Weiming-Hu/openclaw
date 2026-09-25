@@ -249,6 +249,30 @@ function sanitizePlainSpokenText(text: string): string | null {
   return normalizeSpokenText(paragraphs.join(" "));
 }
 
+/**
+ * What a single payload can contribute to the spoken turn.
+ *
+ * `silence` is reserved for a payload that parsed as a spoken contract and
+ * deliberately carried no words. It must stay distinct from `none`: a payload
+ * whose entire body is filtered away (a fenced code block, say) is nonempty on
+ * the wire but leaves the caller nothing to hear, and reporting that as
+ * intentional silence is how a turn ends in dead air.
+ */
+function readPayloadSpokenOutcome(payload: VoiceResponsePayload): "speech" | "silence" | "none" {
+  if (payload.isError || payload.isReasoning) {
+    return "none";
+  }
+  const rawText = payload.text?.trim() ?? "";
+  if (!rawText) {
+    return "none";
+  }
+  const structured = tryParseSpokenJson(rawText);
+  if (structured !== null) {
+    return structured.length > 0 ? "speech" : "silence";
+  }
+  return sanitizePlainSpokenText(rawText) ? "speech" : "none";
+}
+
 function extractSpokenTextFromPayloads(payloads: VoiceResponsePayload[]): string | null {
   const spokenSegments: string[] = [];
 
@@ -563,11 +587,14 @@ export async function generateVoiceResponse(
 
         // SAFETY: same run payloads the extractor above already reads as VoiceResponsePayload[].
         const runPayloads = (result.payloads ?? []) as VoiceResponsePayload[];
-        const hasSpeakablePayload = runPayloads.some(
-          (payload) =>
-            !payload.isError && !payload.isReasoning && (payload.text?.trim() ?? "") !== "",
+        // Only an explicit empty spoken contract counts as deliberate silence.
+        // Testing raw payload text instead would treat content that sanitizing
+        // removes entirely as an intentional pause, and the caller would be left
+        // with neither speech nor a failure notice.
+        const deliberateSilence = runPayloads.some(
+          (payload) => readPayloadSpokenOutcome(payload) === "silence",
         );
-        if (!text && !hasSpeakablePayload) {
+        if (!text && !deliberateSilence) {
           // The provider failed or refused without producing anything the caller
           // could hear: no payloads at all, or only error/reasoning payloads,
           // which the extractor filters out. Report it as an error so the caller

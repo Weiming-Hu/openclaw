@@ -383,6 +383,19 @@ describe("automatic phone reply ownership", () => {
     }
   });
 
+  it("does not speak an identical reply twice while early delivery is in flight", async () => {
+    const call = await startCall();
+    await call.speech("first question");
+    const first = await responseAt(0);
+    // Deliberately not awaited: the early handoff is still playing when the run
+    // completes with identical final text. Recording delivery only after it
+    // resolves would let both handoffs past the duplicate check.
+    const early = first.early("the answer");
+    await first.finish("the answer");
+    expect(await early).toBe(true);
+    expect(call.provider.playTtsCalls.map((entry) => entry.text)).toEqual(["the answer"]);
+  });
+
   it("does not repeat a reply that was already delivered early", async () => {
     const call = await startCall();
     await call.speech("first question");

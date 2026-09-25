@@ -31,6 +31,7 @@ export function createAutoResponseSpeaker(params: {
 }): (text: string) => Promise<boolean> {
   const { callId, isCurrent, logger, deliver } = params;
   let deliveredText: string | null = null;
+  let inFlight: { text: string; attempt: Promise<boolean> } | null = null;
 
   return async (text: string): Promise<boolean> => {
     if (!isCurrent()) {
@@ -41,11 +42,31 @@ export function createAutoResponseSpeaker(params: {
       logger.info(`Skipping duplicate automatic reply ${callId} chars=${text.length}`);
       return true;
     }
-    logger.info(`AI response queued ${callId} chars=${text.length}`);
-    const result = await deliver(text);
-    if (result.success) {
-      deliveredText = text;
+    // Delivery is only recorded once it resolves, so an identical final handoff
+    // arriving while the early reply is still playing would otherwise pass the
+    // check above and queue the answer a second time. Wait for the attempt that
+    // is already in flight instead, and only speak if it turns out to have
+    // failed, so a failed early playback still leaves the final path free.
+    const pending = inFlight;
+    if (pending?.text === text && (await pending.attempt)) {
+      logger.info(`Skipping duplicate automatic reply ${callId} chars=${text.length}`);
+      return true;
     }
-    return result.success;
+    logger.info(`AI response queued ${callId} chars=${text.length}`);
+    const attempt = (async () => {
+      const result = await deliver(text);
+      if (result.success) {
+        deliveredText = text;
+      }
+      return result.success;
+    })();
+    inFlight = { text, attempt };
+    try {
+      return await attempt;
+    } finally {
+      if (inFlight?.attempt === attempt) {
+        inFlight = null;
+      }
+    }
   };
 }

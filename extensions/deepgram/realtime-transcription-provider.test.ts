@@ -458,6 +458,130 @@ describe("buildDeepgramRealtimeTranscriptionProvider", () => {
     session.close();
   });
 
+  it("asks the provider to finalize a turn whose transcript stopped growing", async () => {
+    vi.useFakeTimers();
+    let finalizeRequests = 0;
+    const server = await createDeepgramRealtimeServer({
+      onRequest: () => undefined,
+      onConnection: (ws) => {
+        sendResult(ws, { text: "stalled question", isFinal: true });
+        ws.on("message", (data) => {
+          if (parseClientMessage(data).type === "Finalize") {
+            finalizeRequests += 1;
+            // Deepgram answers the request. The provider still owns the turn
+            // boundary; the host only asked it to decide now.
+            sendResult(ws, { text: "", isFinal: true, fromFinalize: true });
+          }
+        });
+      },
+    });
+    const onPartial = vi.fn();
+    const onTranscript = vi.fn();
+    const session = buildDeepgramRealtimeTranscriptionProvider(transcriptionHost).createSession({
+      providerConfig: {
+        apiKey: "test-key",
+        baseUrl: server.baseUrl,
+        endpointingMs: 25,
+        idleFlushMs: 50,
+      },
+      onPartial,
+      onTranscript,
+    });
+
+    try {
+      await session.connect();
+      await vi.waitFor(() => expect(onPartial).toHaveBeenCalledWith("stalled question"));
+      // Endpointing never produced speech_final, so nothing has committed.
+      expect(finalizeRequests).toBe(0);
+      expect(onTranscript).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(100);
+      await vi.waitFor(() => expect(finalizeRequests).toBe(1));
+      await vi.waitFor(() => expect(onTranscript).toHaveBeenCalledWith("stalled question"));
+    } finally {
+      session.close();
+    }
+  });
+
+  it("lets provider endpointing win before the idle finalize request", async () => {
+    vi.useFakeTimers();
+    let finalizeRequests = 0;
+    const server = await createDeepgramRealtimeServer({
+      onRequest: () => undefined,
+      onConnection: (ws) => {
+        // Healthy audio: endpointing ends the turn on its own.
+        sendResult(ws, { text: "complete question" });
+        sendResult(ws, { text: "complete question", isFinal: true, speechFinal: true });
+        ws.on("message", (data) => {
+          if (parseClientMessage(data).type === "Finalize") {
+            finalizeRequests += 1;
+          }
+        });
+      },
+    });
+    const onTranscript = vi.fn();
+    const session = buildDeepgramRealtimeTranscriptionProvider(transcriptionHost).createSession({
+      providerConfig: {
+        apiKey: "test-key",
+        baseUrl: server.baseUrl,
+        endpointingMs: 25,
+        idleFlushMs: 50,
+      },
+      onTranscript,
+    });
+
+    try {
+      await session.connect();
+      await vi.waitFor(() => expect(onTranscript).toHaveBeenCalledWith("complete question"));
+
+      // speech_final already committed the turn, so the backstop must stay quiet
+      // rather than asking for a second, redundant finalize.
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(finalizeRequests).toBe(0);
+      expect(onTranscript).toHaveBeenCalledTimes(1);
+    } finally {
+      session.close();
+    }
+  });
+
+  it("does not arm the idle finalize request when idleFlushMs is zero", async () => {
+    vi.useFakeTimers();
+    let finalizeRequests = 0;
+    const server = await createDeepgramRealtimeServer({
+      onRequest: () => undefined,
+      onConnection: (ws) => {
+        sendResult(ws, { text: "stalled question", isFinal: true });
+        ws.on("message", (data) => {
+          if (parseClientMessage(data).type === "Finalize") {
+            finalizeRequests += 1;
+          }
+        });
+      },
+    });
+    const onPartial = vi.fn();
+    const onTranscript = vi.fn();
+    const session = buildDeepgramRealtimeTranscriptionProvider(transcriptionHost).createSession({
+      providerConfig: {
+        apiKey: "test-key",
+        baseUrl: server.baseUrl,
+        endpointingMs: 25,
+        idleFlushMs: 0,
+      },
+      onPartial,
+      onTranscript,
+    });
+
+    try {
+      await session.connect();
+      await vi.waitFor(() => expect(onPartial).toHaveBeenCalledWith("stalled question"));
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(finalizeRequests).toBe(0);
+      expect(onTranscript).not.toHaveBeenCalled();
+    } finally {
+      session.close();
+    }
+  });
+
   it("does not merge an interrupted turn into a reconnected provider stream", async () => {
     vi.useFakeTimers();
     let connectionCount = 0;

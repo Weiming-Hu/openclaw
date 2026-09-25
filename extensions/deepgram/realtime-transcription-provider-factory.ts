@@ -27,6 +27,7 @@ type DeepgramRealtimeTranscriptionProviderConfig = {
   encoding?: DeepgramRealtimeTranscriptionEncoding;
   interimResults?: boolean;
   endpointingMs?: number;
+  idleFlushMs?: number;
 };
 
 type DeepgramRealtimeTranscriptionSessionConfig = RealtimeTranscriptionSessionCreateRequest & {
@@ -37,6 +38,7 @@ type DeepgramRealtimeTranscriptionSessionConfig = RealtimeTranscriptionSessionCr
   encoding: DeepgramRealtimeTranscriptionEncoding;
   interimResults: boolean;
   endpointingMs: number;
+  idleFlushMs: number;
   language?: string;
 };
 
@@ -57,6 +59,11 @@ type DeepgramRealtimeTranscriptionEvent = {
 const DEEPGRAM_REALTIME_DEFAULT_SAMPLE_RATE = 8000;
 const DEEPGRAM_REALTIME_DEFAULT_ENCODING: DeepgramRealtimeTranscriptionEncoding = "mulaw";
 const DEEPGRAM_REALTIME_DEFAULT_ENDPOINTING_MS = 800;
+// Extra margin added on top of endpointing before the host asks Deepgram to
+// finalize an idle turn. The request fires at endpointingMs + idleFlushMs after
+// the transcript stops growing, so healthy audio always reaches speech_final
+// first and cancels it; the request only goes out when endpointing stayed silent.
+const DEEPGRAM_REALTIME_DEFAULT_IDLE_FLUSH_MS = 1000;
 const DEEPGRAM_REALTIME_CONNECT_TIMEOUT_MS = 10_000;
 const DEEPGRAM_REALTIME_CLOSE_TIMEOUT_MS = 5_000;
 const DEEPGRAM_REALTIME_MAX_RECONNECT_ATTEMPTS = 5;
@@ -153,6 +160,7 @@ function normalizeProviderConfig(
     encoding: normalizeDeepgramEncoding(raw.encoding),
     interimResults: readBoolean(raw.interimResults ?? raw.interim_results),
     endpointingMs: readFiniteNumber(raw.endpointingMs ?? raw.endpointing ?? raw.silenceDurationMs),
+    idleFlushMs: readFiniteNumber(raw.idleFlushMs ?? raw.idleFlush ?? raw.idle_flush_ms),
   };
 }
 
@@ -180,6 +188,8 @@ function createDeepgramRealtimeTranscriptionSession(
   let finalizeRequested = false;
   let finalizeFallbackFired = false;
   let finalizeFallbackTimer: ReturnType<typeof setTimeout> | undefined;
+  let idleFinalizeTimer: ReturnType<typeof setTimeout> | undefined;
+  let idleFinalizeSent = false;
   let openedOnce = false;
 
   const collapseWhitespace = (value: string) => value.replace(/\s+/g, " ").trim();
@@ -194,8 +204,55 @@ function createDeepgramRealtimeTranscriptionSession(
     }
   };
 
+  const clearIdleFinalize = () => {
+    if (idleFinalizeTimer) {
+      clearTimeout(idleFinalizeTimer);
+      idleFinalizeTimer = undefined;
+    }
+  };
+
+  /**
+   * Ask Deepgram to finalize a turn whose transcript has stopped growing.
+   *
+   * Endpointing normally ends a turn: Deepgram notices the caller stop and
+   * sends `speech_final`. When that never arrives mid-call the turn stalls with
+   * no other terminal signal, the stream stays open, and the caller is answered
+   * by nothing at all.
+   *
+   * The timer runs deliberately longer than Deepgram's own endpointing window,
+   * so healthy audio always reaches `speech_final` first and cancels it. When it
+   * does fire it sends `Finalize` instead of committing locally: Deepgram still
+   * decides the turn boundary and answers with `from_finalize`, which the
+   * existing terminal path commits. Turn completion stays provider-authoritative,
+   * and a gap between provisional results never commits anything on its own.
+   */
+  const armIdleFinalize = (transport: RealtimeTranscriptionWebSocketTransport) => {
+    if (config.idleFlushMs <= 0 || idleFinalizeSent) {
+      return;
+    }
+    clearIdleFinalize();
+    idleFinalizeTimer = setTimeout(() => {
+      idleFinalizeTimer = undefined;
+      if (!finalizedTranscript && !pendingPartial) {
+        return;
+      }
+      idleFinalizeSent = true;
+      try {
+        transport.sendJson({ type: "Finalize" });
+      } catch (error) {
+        try {
+          config.onError?.(error instanceof Error ? error : new Error(String(error)));
+        } catch {
+          // Error observers must not turn an idle finalize request into an uncaught timer exception.
+        }
+      }
+    }, config.endpointingMs + config.idleFlushMs);
+  };
+
   const clearTurn = () => {
     clearFinalizeFallback();
+    clearIdleFinalize();
+    idleFinalizeSent = false;
     finalizedTranscript = "";
     pendingPartial = "";
     speechStarted = false;
@@ -271,11 +328,15 @@ function createDeepgramRealtimeTranscriptionSession(
           if (!updateTurn(nextFinalized, "", transport)) {
             return;
           }
+          idleFinalizeSent = false;
+          armIdleFinalize(transport);
           config.onPartial?.(nextFinalized);
         } else {
           if (!updateTurn(finalizedTranscript, text, transport)) {
             return;
           }
+          idleFinalizeSent = false;
+          armIdleFinalize(transport);
           config.onPartial?.(joinTranscript(finalizedTranscript, text));
         }
         return;
@@ -318,6 +379,7 @@ function createDeepgramRealtimeTranscriptionSession(
       }
       finalizeRequested = false;
       finalizeFallbackFired = false;
+      idleFinalizeSent = false;
     },
     sendAudio: (audio, transport) => {
       transport.sendBinary(audio);
@@ -381,6 +443,7 @@ export function buildDeepgramRealtimeTranscriptionProvider({
           encoding: config.encoding ?? DEEPGRAM_REALTIME_DEFAULT_ENCODING,
           interimResults: config.interimResults ?? true,
           endpointingMs: config.endpointingMs ?? DEEPGRAM_REALTIME_DEFAULT_ENDPOINTING_MS,
+          idleFlushMs: config.idleFlushMs ?? DEEPGRAM_REALTIME_DEFAULT_IDLE_FLUSH_MS,
           language: config.language,
         },
         createRealtimeTranscriptionWebSocketSession,

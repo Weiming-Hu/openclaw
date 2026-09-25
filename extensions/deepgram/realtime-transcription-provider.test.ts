@@ -588,6 +588,49 @@ describe("buildDeepgramRealtimeTranscriptionProvider", () => {
     }
   });
 
+  it("keeps a turn pending when an idle finalize cannot complete it", async () => {
+    vi.useFakeTimers();
+    let finalizeRequests = 0;
+    const server = await createDeepgramRealtimeServer({
+      onRequest: () => undefined,
+      onConnection: (ws) => {
+        sendResult(ws, { text: "what is the", isFinal: true });
+        sendResult(ws, { text: "weather like" });
+        ws.on("message", (data) => {
+          if (parseClientMessage(data).type === "Finalize") {
+            finalizeRequests += 1;
+          }
+        });
+      },
+    });
+    const onPartial = vi.fn();
+    const onTranscript = vi.fn();
+    const session = buildDeepgramRealtimeTranscriptionProvider(transcriptionHost).createSession({
+      providerConfig: {
+        apiKey: "***",
+        baseUrl: server.baseUrl,
+        endpointingMs: 25,
+        idleFlushMs: 50,
+      },
+      onPartial,
+      onTranscript,
+    });
+
+    try {
+      await session.connect();
+      await vi.waitFor(() => expect(onPartial).toHaveBeenCalledWith("what is the weather like"));
+      await vi.advanceTimersByTimeAsync(100);
+      await vi.waitFor(() => expect(finalizeRequests).toBe(1));
+
+      // A provisional tail means the utterance has not ended. Recovery must not
+      // hand up the confirmed prefix as though it were the whole question.
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(onTranscript).not.toHaveBeenCalled();
+    } finally {
+      session.close();
+    }
+  });
+
   it("leaves the idle finalize request disabled unless idleFlushMs is configured", async () => {
     vi.useFakeTimers();
     let finalizeRequests = 0;

@@ -264,12 +264,16 @@ function createDeepgramRealtimeTranscriptionSession(
       }
       // Deepgram may answer a Finalize with no Results event. Release the turn
       // rather than leaving it pending forever, emitting only text the provider
-      // already marked final; the provisional tail is discarded rather than
-      // guessed at, matching the close-scoped fallback.
+      // already marked final.
+      //
+      // A provisional tail means the utterance demonstrably has not ended, so
+      // committing the confirmed prefix would hand up half a question as though
+      // it were whole. That turn stays pending and only clears the sent flag, so
+      // a later Results event can arm a fresh request.
       idleFinalizeRecoveryTimer = setTimeout(() => {
         idleFinalizeRecoveryTimer = undefined;
         idleFinalizeSent = false;
-        if (!finalizedTranscript) {
+        if (!finalizedTranscript || pendingPartial) {
           return;
         }
         try {

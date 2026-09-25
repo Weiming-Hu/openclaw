@@ -544,6 +544,82 @@ describe("buildDeepgramRealtimeTranscriptionProvider", () => {
     }
   });
 
+  it("releases a turn when an idle finalize produces no Results event", async () => {
+    vi.useFakeTimers();
+    let finalizeRequests = 0;
+    const server = await createDeepgramRealtimeServer({
+      onRequest: () => undefined,
+      onConnection: (ws) => {
+        sendResult(ws, { text: "stalled question", isFinal: true });
+        ws.on("message", (data) => {
+          if (parseClientMessage(data).type === "Finalize") {
+            finalizeRequests += 1;
+            // Deepgram answers with nothing at all: no Results event follows.
+          }
+        });
+      },
+    });
+    const onPartial = vi.fn();
+    const onTranscript = vi.fn();
+    const session = buildDeepgramRealtimeTranscriptionProvider(transcriptionHost).createSession({
+      providerConfig: {
+        apiKey: "***",
+        baseUrl: server.baseUrl,
+        endpointingMs: 25,
+        idleFlushMs: 50,
+      },
+      onPartial,
+      onTranscript,
+    });
+
+    try {
+      await session.connect();
+      await vi.waitFor(() => expect(onPartial).toHaveBeenCalledWith("stalled question"));
+      await vi.advanceTimersByTimeAsync(100);
+      await vi.waitFor(() => expect(finalizeRequests).toBe(1));
+      // Without recovery the turn would stay pending until hangup, which is the
+      // failure this backstop exists to prevent.
+      expect(onTranscript).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(2_500);
+      await vi.waitFor(() => expect(onTranscript).toHaveBeenCalledWith("stalled question"));
+    } finally {
+      session.close();
+    }
+  });
+
+  it("leaves the idle finalize request disabled unless idleFlushMs is configured", async () => {
+    vi.useFakeTimers();
+    let finalizeRequests = 0;
+    const server = await createDeepgramRealtimeServer({
+      onRequest: () => undefined,
+      onConnection: (ws) => {
+        sendResult(ws, { text: "stalled question", isFinal: true });
+        ws.on("message", (data) => {
+          if (parseClientMessage(data).type === "Finalize") {
+            finalizeRequests += 1;
+          }
+        });
+      },
+    });
+    const onPartial = vi.fn();
+    const session = buildDeepgramRealtimeTranscriptionProvider(transcriptionHost).createSession({
+      // idleFlushMs deliberately omitted: existing installs must not inherit it.
+      providerConfig: { apiKey: "***", baseUrl: server.baseUrl, endpointingMs: 25 },
+      onPartial,
+      onTranscript: vi.fn(),
+    });
+
+    try {
+      await session.connect();
+      await vi.waitFor(() => expect(onPartial).toHaveBeenCalledWith("stalled question"));
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(finalizeRequests).toBe(0);
+    } finally {
+      session.close();
+    }
+  });
+
   it("does not arm the idle finalize request when idleFlushMs is zero", async () => {
     vi.useFakeTimers();
     let finalizeRequests = 0;

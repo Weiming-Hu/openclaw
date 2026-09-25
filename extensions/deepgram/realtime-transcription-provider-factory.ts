@@ -63,7 +63,18 @@ const DEEPGRAM_REALTIME_DEFAULT_ENDPOINTING_MS = 800;
 // finalize an idle turn. The request fires at endpointingMs + idleFlushMs after
 // the transcript stops growing, so healthy audio always reaches speech_final
 // first and cancels it; the request only goes out when endpointing stayed silent.
-const DEEPGRAM_REALTIME_DEFAULT_IDLE_FLUSH_MS = 1000;
+//
+// Disabled by default. The timer keys on Results activity rather than on caller
+// silence, so a provider that pauses Results mid-utterance could force a turn
+// boundary while the caller is still speaking. Installations that actually see
+// stalled turns opt in by setting idleFlushMs; nobody inherits the tradeoff on
+// upgrade.
+const DEEPGRAM_REALTIME_DEFAULT_IDLE_FLUSH_MS = 0;
+// Bounded wait for Deepgram to answer an idle Finalize. A Finalize can produce
+// no Results event at all, and the existing no-result fallback is close-scoped,
+// so without this the turn would stay pending until hangup - exactly the failure
+// the idle request exists to prevent.
+const DEEPGRAM_REALTIME_IDLE_FINALIZE_RECOVERY_MS = 2_000;
 const DEEPGRAM_REALTIME_CONNECT_TIMEOUT_MS = 10_000;
 const DEEPGRAM_REALTIME_CLOSE_TIMEOUT_MS = 5_000;
 const DEEPGRAM_REALTIME_MAX_RECONNECT_ATTEMPTS = 5;
@@ -189,6 +200,7 @@ function createDeepgramRealtimeTranscriptionSession(
   let finalizeFallbackFired = false;
   let finalizeFallbackTimer: ReturnType<typeof setTimeout> | undefined;
   let idleFinalizeTimer: ReturnType<typeof setTimeout> | undefined;
+  let idleFinalizeRecoveryTimer: ReturnType<typeof setTimeout> | undefined;
   let idleFinalizeSent = false;
   let openedOnce = false;
 
@@ -208,6 +220,10 @@ function createDeepgramRealtimeTranscriptionSession(
     if (idleFinalizeTimer) {
       clearTimeout(idleFinalizeTimer);
       idleFinalizeTimer = undefined;
+    }
+    if (idleFinalizeRecoveryTimer) {
+      clearTimeout(idleFinalizeRecoveryTimer);
+      idleFinalizeRecoveryTimer = undefined;
     }
   };
 
@@ -246,6 +262,26 @@ function createDeepgramRealtimeTranscriptionSession(
           // Error observers must not turn an idle finalize request into an uncaught timer exception.
         }
       }
+      // Deepgram may answer a Finalize with no Results event. Release the turn
+      // rather than leaving it pending forever, emitting only text the provider
+      // already marked final; the provisional tail is discarded rather than
+      // guessed at, matching the close-scoped fallback.
+      idleFinalizeRecoveryTimer = setTimeout(() => {
+        idleFinalizeRecoveryTimer = undefined;
+        idleFinalizeSent = false;
+        if (!finalizedTranscript) {
+          return;
+        }
+        try {
+          flushFinalizedTurn();
+        } catch (error) {
+          try {
+            config.onError?.(error instanceof Error ? error : new Error(String(error)));
+          } catch {
+            // Error observers must not turn idle finalize recovery into an uncaught timer exception.
+          }
+        }
+      }, DEEPGRAM_REALTIME_IDLE_FINALIZE_RECOVERY_MS);
     }, config.endpointingMs + config.idleFlushMs);
   };
 

@@ -603,11 +603,23 @@ describe("generateVoiceResponse", () => {
     // The extractor filters error payloads out, so a nonempty error payload
     // still leaves the caller with nothing to hear.
     const { result } = await runGenerateVoiceResponse([
-      { text: "429 Too Many Requests", isError: true },
+      { text: "Upstream provider is unavailable", isError: true },
     ]);
 
     expect(result.text).toBeNull();
     expect(result.error).toBe("Response generation produced no output");
+  });
+
+  it("classifies rate limiting without echoing the provider's error text", async () => {
+    // The spoken notice offers "try again in a little while" only for rate
+    // limiting, so the category has to survive the trip out of the generator.
+    // The provider's own prose is unbounded third-party text: matched, never
+    // carried, which the org identifier below asserts.
+    const errorText = "429 slow down, org org_secret123 exceeded its quota";
+    const { result } = await runGenerateVoiceResponse([{ text: errorText, isError: true }]);
+    expect(result.text).toBeNull();
+    expect(result.error).toBe("Response generation produced no output: rate limited (429)");
+    expect(result.error).not.toContain("org_secret123");
   });
 
   it("keeps deliberate silence silent rather than reporting an error", async () => {

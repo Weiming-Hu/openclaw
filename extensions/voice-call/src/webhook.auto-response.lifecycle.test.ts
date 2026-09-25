@@ -387,6 +387,21 @@ describe("automatic phone reply ownership", () => {
     ]);
   });
 
+  it("names rate limiting for a run that returned only a 429 error payload", async () => {
+    // The generator cannot hand the provider's own text to the notice, so it
+    // classifies the payload and reports the category instead. This is the
+    // exact string `describeNoOutputFailure` emits for an error-only 429 run
+    // (see response-generator.test.ts); the two assertions together keep the
+    // caller's rate-limit advice connected to what the provider actually did.
+    const call = await startCall();
+    await call.speech("first question");
+    const first = await responseAt(0);
+    await first.fail("Response generation produced no output: rate limited (429)");
+    expect(call.provider.playTtsCalls.map((entry) => entry.text)).toEqual([
+      "Sorry, my language service is rate limited right now, so I can't answer that. Please try again in a little while.",
+    ]);
+  });
+
   it("stays silent on a failure that follows a delivered early reply", async () => {
     const call = await startCall();
     await call.speech("first question");

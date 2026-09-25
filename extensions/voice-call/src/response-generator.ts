@@ -279,6 +279,28 @@ function extractSpokenTextFromPayloads(payloads: VoiceResponsePayload[]): string
   return spokenSegments.length > 0 ? spokenSegments.join(" ").trim() : null;
 }
 
+/** Provider rate limiting, as it appears in an error payload's text. */
+const RATE_LIMITED_ERROR = /\b429\b|rate.?limit|too many requests/i;
+
+/**
+ * Failure description for a turn that produced nothing the caller could hear.
+ *
+ * The provider's own error text is deliberately not returned verbatim: it is
+ * unbounded third-party prose, so it is classified here and discarded. Rate
+ * limiting is the one category worth carrying across the boundary, because it
+ * is the only failure with useful caller advice — wait and retry, rather than
+ * a generic apology. The returned wording is what the spoken notice keys on,
+ * so it must stay recognisable to `generationFailureNotice`.
+ */
+function describeNoOutputFailure(payloads: VoiceResponsePayload[]): string {
+  const rateLimited = payloads.some(
+    (payload) => payload.isError && RATE_LIMITED_ERROR.test(payload.text ?? ""),
+  );
+  return rateLimited
+    ? "Response generation produced no output: rate limited (429)"
+    : "Response generation produced no output";
+}
+
 async function deliverEarlyText(
   callback: (text: string) => Promise<boolean>,
   text: string,
@@ -540,7 +562,8 @@ export async function generateVoiceResponse(
         }
 
         // SAFETY: same run payloads the extractor above already reads as VoiceResponsePayload[].
-        const hasSpeakablePayload = ((result.payloads ?? []) as VoiceResponsePayload[]).some(
+        const runPayloads = (result.payloads ?? []) as VoiceResponsePayload[];
+        const hasSpeakablePayload = runPayloads.some(
           (payload) =>
             !payload.isError && !payload.isReasoning && (payload.text?.trim() ?? "") !== "",
         );
@@ -556,7 +579,7 @@ export async function generateVoiceResponse(
           return {
             text: null,
             deliveredEarly,
-            error: "Response generation produced no output",
+            error: describeNoOutputFailure(runPayloads),
           };
         }
 

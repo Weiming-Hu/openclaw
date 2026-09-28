@@ -3,7 +3,10 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { createDeferred } from "openclaw/plugin-sdk/extension-shared";
-import { createRealtimeTranscriptionWebSocketSession } from "openclaw/plugin-sdk/realtime-transcription-session";
+import {
+  createRealtimeTranscriptionWebSocketSession,
+  type RealtimeTranscriptionWebSocketSessionOptions,
+} from "openclaw/plugin-sdk/realtime-transcription-session";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type WebSocket from "ws";
 import type { RawData } from "ws";
@@ -76,6 +79,24 @@ function parseClientMessage(data: RawData): Record<string, unknown> {
       ? Buffer.concat(data)
       : Buffer.from(data);
   return JSON.parse(bytes.toString("utf8")) as Record<string, unknown>;
+}
+
+/**
+ * Host wrapper that reproduces the two ways an outbound control frame fails to
+ * leave the process: `sendJson` returning false (stale, closed or superseded
+ * socket, and backpressure) and the socket send throwing. Only frames sent from
+ * the provider's message handler are affected, so the close path still behaves.
+ */
+function createControlFrameFailureHost(sendJson: (payload: unknown) => boolean) {
+  return {
+    createRealtimeTranscriptionWebSocketSession: <Event>(
+      options: RealtimeTranscriptionWebSocketSessionOptions<Event>,
+    ) =>
+      createRealtimeTranscriptionWebSocketSession<Event>({
+        ...options,
+        onMessage: (event, transport) => options.onMessage?.(event, { ...transport, sendJson }),
+      }),
+  };
 }
 
 describe("buildDeepgramRealtimeTranscriptionProvider", () => {
@@ -544,7 +565,7 @@ describe("buildDeepgramRealtimeTranscriptionProvider", () => {
     }
   });
 
-  it("releases a turn when an idle finalize produces no Results event", async () => {
+  it("keeps a turn pending when the provider never answers the idle finalize", async () => {
     vi.useFakeTimers();
     let finalizeRequests = 0;
     const server = await createDeepgramRealtimeServer({
@@ -561,6 +582,7 @@ describe("buildDeepgramRealtimeTranscriptionProvider", () => {
     });
     const onPartial = vi.fn();
     const onTranscript = vi.fn();
+    const onError = vi.fn();
     const session = buildDeepgramRealtimeTranscriptionProvider(transcriptionHost).createSession({
       providerConfig: {
         apiKey: "***",
@@ -570,6 +592,7 @@ describe("buildDeepgramRealtimeTranscriptionProvider", () => {
       },
       onPartial,
       onTranscript,
+      onError,
     });
 
     try {
@@ -577,12 +600,117 @@ describe("buildDeepgramRealtimeTranscriptionProvider", () => {
       await vi.waitFor(() => expect(onPartial).toHaveBeenCalledWith("stalled question"));
       await vi.advanceTimersByTimeAsync(100);
       await vi.waitFor(() => expect(finalizeRequests).toBe(1));
-      // Without recovery the turn would stay pending until hangup, which is the
-      // failure this backstop exists to prevent.
-      expect(onTranscript).not.toHaveBeenCalled();
 
-      await vi.advanceTimersByTimeAsync(2_500);
-      await vi.waitFor(() => expect(onTranscript).toHaveBeenCalledWith("stalled question"));
+      // An is_final segment is confirmed text, not a completed utterance. With
+      // the call still open and no speech_final or from_finalize in sight, the
+      // host must not invent the provider's turn boundary: the turn stays
+      // pending and the unanswered request surfaces as a recoverable failure.
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(onTranscript).not.toHaveBeenCalled();
+      await vi.waitFor(() =>
+        expect(onError).toHaveBeenCalledWith(
+          expect.objectContaining({
+            message: expect.stringContaining("idle finalize request went unanswered"),
+          }),
+        ),
+      );
+    } finally {
+      session.close();
+    }
+  });
+
+  it("does not watch for an answer when the idle finalize request was refused", async () => {
+    vi.useFakeTimers();
+    let finalizeRequests = 0;
+    const server = await createDeepgramRealtimeServer({
+      onRequest: () => undefined,
+      onConnection: (ws) => {
+        sendResult(ws, { text: "stalled question", isFinal: true });
+        ws.on("message", (data) => {
+          if (parseClientMessage(data).type === "Finalize") {
+            finalizeRequests += 1;
+          }
+        });
+      },
+    });
+    const onPartial = vi.fn();
+    const onTranscript = vi.fn();
+    const onError = vi.fn();
+    // sendJson reports false before it touches the socket for a stale or closed
+    // connection, and again for backpressure. The frame never leaves.
+    const host = createControlFrameFailureHost(() => false);
+    const session = buildDeepgramRealtimeTranscriptionProvider(host).createSession({
+      providerConfig: {
+        apiKey: "***",
+        baseUrl: server.baseUrl,
+        endpointingMs: 25,
+        idleFlushMs: 50,
+      },
+      onPartial,
+      onTranscript,
+      onError,
+    });
+
+    try {
+      await session.connect();
+      await vi.waitFor(() => expect(onPartial).toHaveBeenCalledWith("stalled question"));
+      await vi.advanceTimersByTimeAsync(10_000);
+
+      // A request that was never sent cannot draw a provider terminal result,
+      // so nothing is waiting on one: no watchdog, no reported timeout, and the
+      // turn is still pending for the next Results event to ask about.
+      expect(finalizeRequests).toBe(0);
+      expect(onTranscript).not.toHaveBeenCalled();
+      expect(onError).not.toHaveBeenCalled();
+    } finally {
+      session.close();
+    }
+  });
+
+  it("does not watch for an answer when the idle finalize request throws", async () => {
+    vi.useFakeTimers();
+    let finalizeRequests = 0;
+    const server = await createDeepgramRealtimeServer({
+      onRequest: () => undefined,
+      onConnection: (ws) => {
+        sendResult(ws, { text: "stalled question", isFinal: true });
+        ws.on("message", (data) => {
+          if (parseClientMessage(data).type === "Finalize") {
+            finalizeRequests += 1;
+          }
+        });
+      },
+    });
+    const onPartial = vi.fn();
+    const onTranscript = vi.fn();
+    const onError = vi.fn();
+    const host = createControlFrameFailureHost((): boolean => {
+      throw new Error("socket send failed");
+    });
+    const session = buildDeepgramRealtimeTranscriptionProvider(host).createSession({
+      providerConfig: {
+        apiKey: "***",
+        baseUrl: server.baseUrl,
+        endpointingMs: 25,
+        idleFlushMs: 50,
+      },
+      onPartial,
+      onTranscript,
+      onError,
+    });
+
+    try {
+      await session.connect();
+      await vi.waitFor(() => expect(onPartial).toHaveBeenCalledWith("stalled question"));
+      await vi.advanceTimersByTimeAsync(10_000);
+
+      // The send failure is reported once. It must not also arm the watchdog,
+      // which would report a missing answer to a request nobody made.
+      expect(finalizeRequests).toBe(0);
+      expect(onTranscript).not.toHaveBeenCalled();
+      expect(onError).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ message: "socket send failed" }),
+      );
     } finally {
       session.close();
     }

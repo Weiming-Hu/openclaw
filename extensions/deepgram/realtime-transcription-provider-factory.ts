@@ -71,10 +71,12 @@ const DEEPGRAM_REALTIME_DEFAULT_ENDPOINTING_MS = 800;
 // upgrade.
 const DEEPGRAM_REALTIME_DEFAULT_IDLE_FLUSH_MS = 0;
 // Bounded wait for Deepgram to answer an idle Finalize. A Finalize can produce
-// no Results event at all, and the existing no-result fallback is close-scoped,
-// so without this the turn would stay pending until hangup - exactly the failure
-// the idle request exists to prevent.
-const DEEPGRAM_REALTIME_IDLE_FINALIZE_RECOVERY_MS = 2_000;
+// no Results event at all. The turn still stays pending in that case - only the
+// provider ends a turn - but the unanswered request is reported as a recoverable
+// failure and a later Results event may ask again.
+const DEEPGRAM_REALTIME_IDLE_FINALIZE_UNANSWERED_MS = 2_000;
+const DEEPGRAM_REALTIME_IDLE_FINALIZE_UNANSWERED_MESSAGE =
+  "Deepgram realtime idle finalize request went unanswered; turn left pending";
 const DEEPGRAM_REALTIME_CONNECT_TIMEOUT_MS = 10_000;
 const DEEPGRAM_REALTIME_CLOSE_TIMEOUT_MS = 5_000;
 const DEEPGRAM_REALTIME_MAX_RECONNECT_ATTEMPTS = 5;
@@ -227,6 +229,14 @@ function createDeepgramRealtimeTranscriptionSession(
     }
   };
 
+  const reportIdleFinalizeError = (error: unknown) => {
+    try {
+      config.onError?.(error instanceof Error ? error : new Error(String(error)));
+    } catch {
+      // Error observers must not turn an idle finalize timer into an uncaught exception.
+    }
+  };
+
   /**
    * Ask Deepgram to finalize a turn whose transcript has stopped growing.
    *
@@ -252,40 +262,39 @@ function createDeepgramRealtimeTranscriptionSession(
       if (!finalizedTranscript && !pendingPartial) {
         return;
       }
-      idleFinalizeSent = true;
+      // `sendJson` reports false before it ever touches the socket for a stale,
+      // closed or superseded connection, and again for backpressure; a throw
+      // leaves the frame unsent too. An unsent request can never draw a provider
+      // terminal result, so nothing is pending on one: leave the flag clear so
+      // the next Results event arms a fresh request, and do not start the
+      // unanswered-request watchdog for a request that was never made.
+      let requestSent = false;
       try {
-        transport.sendJson({ type: "Finalize" });
+        requestSent = transport.sendJson({ type: "Finalize" });
       } catch (error) {
-        try {
-          config.onError?.(error instanceof Error ? error : new Error(String(error)));
-        } catch {
-          // Error observers must not turn an idle finalize request into an uncaught timer exception.
-        }
+        reportIdleFinalizeError(error);
       }
-      // Deepgram may answer a Finalize with no Results event. Release the turn
-      // rather than leaving it pending forever, emitting only text the provider
-      // already marked final.
-      //
-      // A provisional tail means the utterance demonstrably has not ended, so
-      // committing the confirmed prefix would hand up half a question as though
-      // it were whole. That turn stays pending and only clears the sent flag, so
-      // a later Results event can arm a fresh request.
+      if (!requestSent) {
+        idleFinalizeSent = false;
+        return;
+      }
+      idleFinalizeSent = true;
+      // Deepgram may answer a Finalize with no Results event at all. Committing
+      // here would invent a turn boundary the provider never gave: an
+      // `is_final` segment is confirmed text, not a completed utterance, and
+      // only `speech_final` or `from_finalize` ends a turn. While the call is
+      // open the turn therefore stays pending; the unanswered request is
+      // surfaced as a recoverable failure and the cleared flag lets a later
+      // Results event ask again. The close path still preserves confirmed text
+      // at hangup.
       idleFinalizeRecoveryTimer = setTimeout(() => {
         idleFinalizeRecoveryTimer = undefined;
         idleFinalizeSent = false;
-        if (!finalizedTranscript || pendingPartial) {
+        if (!finalizedTranscript && !pendingPartial) {
           return;
         }
-        try {
-          flushFinalizedTurn();
-        } catch (error) {
-          try {
-            config.onError?.(error instanceof Error ? error : new Error(String(error)));
-          } catch {
-            // Error observers must not turn idle finalize recovery into an uncaught timer exception.
-          }
-        }
-      }, DEEPGRAM_REALTIME_IDLE_FINALIZE_RECOVERY_MS);
+        reportIdleFinalizeError(new Error(DEEPGRAM_REALTIME_IDLE_FINALIZE_UNANSWERED_MESSAGE));
+      }, DEEPGRAM_REALTIME_IDLE_FINALIZE_UNANSWERED_MS);
     }, config.endpointingMs + config.idleFlushMs);
   };
 

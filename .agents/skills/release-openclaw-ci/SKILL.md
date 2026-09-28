@@ -62,7 +62,7 @@ Use this with `$release-openclaw-maintainer` and `$openclaw-testing` when a rele
   access first; unset preserves ordinary routing. Shared workers inherit the
   caller group; PR/main CI and unrelated scheduled work remain outside it.
 - Validate provider secrets before dispatching expensive full release matrices.
-- Check the nightly parent for the Code SHA before dispatching a fresh main validation; it seals per-child receipts that exact-target dispatches adopt when inputs match.
+- Check the nightly parent for the Code SHA before dispatching a fresh main validation; it seals per-child receipts that exact-target dispatches adopt when inputs match. The nightly runs this helper route (`--sha <main-sha> --workflow-sha <main-sha>`), so its parent runs on a `release-ci/<sha12>-<id>` branch, not `main`.
 - Every selected validation lane must pass. Stable tags require stable/full
   evidence, soak, and blocking performance. Beta-profile evidence cannot qualify
   stable. No lane or soak waiver bypasses these requirements. All-group
@@ -186,9 +186,9 @@ Keep the required publication proofs and soak gates intact.
 
 ## Continuous release readiness
 
-The 04:00 UTC nightly seals a direct-root manifest and per-child receipts for the exact main SHA.
-For a same-day cut, start the release train on `main` (version and changelog) before 04:00 UTC,
-then cut `release/YYYY.M.PATCH` at the nightly SHA so the Code SHA equals the validated SHA.
+The scheduled main validation (every 3 hours at :07 UTC) seals a direct-root manifest and per-child receipts for the exact main SHA.
+For a same-day cut, land the release train on `main` (version and changelog) before the next scheduled run,
+then cut `release/YYYY.M.PATCH` at that run's SHA so the Code SHA equals the validated SHA.
 Per-child adoption matches exact target SHA, role, and dispatch inputs minus `dispatch_id`:
 `productPerformance` is adopted because its inputs are context-free and match.
 A stable candidate dispatched with `--target-ref release/YYYY.M.PATCH` resolves
@@ -560,8 +560,9 @@ for publication ordering and prepared/direct recovery.
 
 - `pnpm release:stable <version>` ([orchestrated stable release](../release-openclaw-maintainer/references/regular-release.md#orchestrated-stable-release))
   dispatches the parent once, approves the parent's `npm-release` gate, prints
-  the child-approval and stale-child sweep commands below instead of running
-  them (it never mutates a child run), and on any refusal prints `Next:` with
+  child-approval commands only for older tooling without `npm-publish` and
+  stale-child sweep commands when needed (it never mutates a child run).
+  On any refusal it prints `Next:` with
   the exact recovery command.
 - The parent's `npm-release` approval mints the attested
   `openclaw-release-approval-v1-<parent run>-<attempt>` receipt; bot-dispatched
@@ -569,16 +570,16 @@ for publication ordering and prepared/direct recovery.
   their gates. The ClawHub OIDC child skips its `clawhub-plugin-release` gate
   on a verified receipt and instead waits for the parent's
   `openclaw-clawhub-parent-authorization-v2-*` receipt before publishing. npm
-  children (`Plugin NPM Release`, `openclaw-npm-release.yml`) keep
-  `npm-release` (npm trusted publishers are bound to it, `npm trust list
-openclaw`) and the workflow token cannot approve it (`canApprove=false`), so
-  an unapproved npm child sits `waiting` silently. Watch every child and
-  approve npm children only (environment id `13010111854`):
-  ```bash
-  gh api repos/openclaw/openclaw/actions/runs/<child>/pending_deployments
-  gh api -X POST repos/openclaw/openclaw/actions/runs/<child>/pending_deployments \
-    -f state=approved -f comment="<reason>" -F 'environment_ids[]=13010111854'
-  ```
+  children (`Plugin NPM Release`, `openclaw-npm-release.yml`) skip their
+  `npm-release` approval job on the verified-receipt route and publish in
+  `npm-publish`, with trusted publishers bound to that environment. Immediately
+  before publication they wait for the parent attempt's receipt and require
+  that attempt to remain `in_progress`. This is one human approval per release.
+  `npm-publish` has no reviewers and admits only protected
+  `release-publish/<sha12>-<n>` tags. Real manual/recovery npm dispatches must
+  use such a tooling tag and still need their own `npm-release` approval job;
+  the read-only OIDC preflight also uses `npm-publish` and requires that tag.
+  Artifact-only preflights keep their existing refs and have no environment.
 - Never approve ClawHub children (`plugin-clawhub-release.yml`,
   `plugin-clawhub-new.yml`) by hand. `plugin-clawhub-release.yml` needs no
   approval on the bot route (receipt-verified); the `Artifact not found` line
@@ -646,8 +647,11 @@ pnpm ci:full-release \
   -f dispatch_release_evidence=false
 ```
 
-The helper verifies both SHAs, creates the transport ref with the equivalent of
-the following GitHub refs operation, and dispatches from that branch:
+The helper verifies both SHAs and proves GitHub serves the exact Validation SHA
+by bare-SHA fetch in a fresh temporary repository, including in dry runs, before
+retaining a request or mutating remote state. It creates one immutable workflow
+transport ref with the equivalent of the following GitHub refs operation, and
+dispatches from that branch:
 
 ```bash
 gh api --method POST repos/openclaw/openclaw/git/refs \
@@ -732,7 +736,7 @@ node scripts/release-ci-summary.mjs <full-release-run-id> --watch
 Do not start this watcher when the SHA-pinned helper is still the foreground
 owner. The helper reads the exact Release Decision artifact itself. On
 `blocked_diagnostics_running`, it exits nonzero immediately, keeps the temporary
-refs, and leaves Diagnostic Drain collecting the remaining terminal evidence.
+workflow ref, and leaves Diagnostic Drain collecting the remaining terminal evidence.
 The watcher behaves the same way for separately dispatched parents: it reports
 the Release Decision blocker once and exits while the drain continues.
 

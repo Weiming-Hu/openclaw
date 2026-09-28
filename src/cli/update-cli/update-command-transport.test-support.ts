@@ -4,6 +4,8 @@ import { expectDefined } from "@openclaw/normalization-core";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { expect, vi } from "vitest";
 import type { GatewayServiceCommandConfig } from "../../daemon/service-types.js";
+import { runtimeProcessEntrypoints } from "../../infra/runtime-process-entrypoints.js";
+import { resolveNpmGlobalPrefixLayoutFromPrefix } from "../../infra/update-npm-prefix.js";
 import type { runCommandWithTimeout, runUtf8CommandWithTimeout } from "../../process/exec.js";
 import { createCommandResult as commandResult } from "../../test-utils/npm-spec-install-test-helpers.js";
 
@@ -28,8 +30,9 @@ export async function createUpdateCommandTransportFixture(transport: {
   const { spawn: spawnChild } =
     await vi.importActual<typeof import("node:child_process")>("node:child_process");
   return async (...[argv, options]: Parameters<typeof transport.run>) => {
+    const npmProbe = argv.at(-2);
     if (
-      argv.at(-2) === "prefix" &&
+      (npmProbe === "prefix" || npmProbe === "root") &&
       argv.at(-1) === "-g" &&
       ((argv.length === 3 && argv[0] === "npm") ||
         (argv.length === 4 &&
@@ -37,9 +40,16 @@ export async function createUpdateCommandTransportFixture(transport: {
           path.basename(argv[1] ?? "") === "npm-cli.js"))
     ) {
       const result = await transport.run(argv, options);
-      // Supply the fixture's inspected empty prefix when an effect double omits read-only metadata.
+      // Both npm probes describe the same empty prefix when an effect double omits metadata.
       return result.code === 0 && result.stdout === ""
-        ? { ...result, stdout: `${transport.npmPrefix}\n` }
+        ? {
+            ...result,
+            stdout: `${
+              npmProbe === "root"
+                ? resolveNpmGlobalPrefixLayoutFromPrefix(transport.npmPrefix).globalRoot
+                : transport.npmPrefix
+            }\n`,
+          }
         : result;
     }
     if (typeof options === "number" || !options.beforeInput) {
@@ -127,6 +137,15 @@ export async function createUpdateUtf8CommandTransportFixture(
     await vi.importActual<typeof import("node:child_process")>("node:child_process");
   const runDoctorFixture = await createUpdateCommandTransportFixture(transport);
   return async (argv, options) => {
+    if (
+      argv.length === 3 &&
+      argv[2] === "--check" &&
+      path.basename(argv[1] ?? "") ===
+        path.basename(runtimeProcessEntrypoints.updateMigratedFinalize.distWorkerPath)
+    ) {
+      // These CLI fixture packages do not implement the delegated post-core worker.
+      return commandResult({ code: 1 });
+    }
     if (argv.at(-1) === "--doctor" && typeof options !== "number" && options.beforeInput) {
       // Keep Doctor effects fixture-owned without bypassing live child admission.
       const result = await runDoctorFixture(argv, options);
@@ -146,7 +165,9 @@ export async function createUpdateUtf8CommandTransportFixture(
         ((argv.includes("--eval") && typeof input.directory === "string") ||
           (stateWorker &&
             typeof input.stateDir === "string" &&
-            ["discover", "versions", "database-backup"].includes(String(input.mode))));
+            ["discover", "versions", "database-backup", "database-generations"].includes(
+              String(input.mode),
+            )));
       if (metadataRequest || foreignPlatformSqlite) {
         // SQLite workers use the real host executable/VFS even when service tests simulate Windows.
         const metadata = spawnMetadata(

@@ -166,11 +166,30 @@ function normalizeSpokenText(value: string): string | null {
 const SPOKEN_CONTROL_CHARS = new RegExp(String.raw`[\u0000-\u001f]+`, "g");
 
 /**
- * Escape sequences JSON rejects: a unicode escape without four hex digits, or a
- * backslash before a character that is not a legal escape. Demoting each one to the
- * character it precedes salvages a block that a strict decode would lose.
+ * One escape sequence, matched left to right: a valid `\uXXXX`, a valid
+ * single-character escape, or whatever single character trails a backslash that
+ * opens neither. Matching in sequence order is what keeps a valid `\\` pair
+ * intact: the pair is consumed as one unit, so its second backslash is never
+ * re-read as the start of a new escape.
  */
-const INVALID_JSON_ESCAPES = new RegExp(String.raw`\\(u(?![0-9a-fA-F]{4})|[^"\\/bfnrtu])`, "g");
+const JSON_ESCAPE_SEQUENCE = new RegExp(String.raw`\\(u[0-9a-fA-F]{4}|["\\/bfnrt]|[\s\S]?)`, "g");
+
+/** One escape sequence body, backslash excluded, that JSON accepts. */
+const VALID_JSON_ESCAPE_BODY = new RegExp(String.raw`^(?:u[0-9a-fA-F]{4}|["\\/bfnrt])$`);
+
+/**
+ * Demotes the escapes JSON rejects -- a unicode escape without four hex digits,
+ * or a backslash before a character that is not a legal escape -- to the
+ * character each precedes, so one bad escape does not cost the caller the
+ * sentence it sits in. Every valid escape survives verbatim, `\\` included:
+ * rewriting the second backslash of an escaped pair would leave a lone invalid
+ * escape behind and fail the decode this pass exists to salvage.
+ */
+function demoteInvalidJsonEscapes(value: string): string {
+  return value.replace(JSON_ESCAPE_SEQUENCE, (sequence, body: string) =>
+    VALID_JSON_ESCAPE_BODY.test(body) ? sequence : body,
+  );
+}
 
 /** Every `"spoken"` field the reply declares, whether or not it can be scanned. */
 const SPOKEN_FIELD_DECLARATIONS = new RegExp(String.raw`"spoken"\s*:`, "gi");
@@ -195,7 +214,7 @@ function decodeInlineSpokenSegment(rawSegment: string): InlineSpokenDecode | nul
   // preserves the spoken text exactly.
   const folded = rawSegment.replace(SPOKEN_CONTROL_CHARS, " ");
   const foldedControlChars = folded !== rawSegment;
-  const passes = [folded, folded.replace(INVALID_JSON_ESCAPES, "$1")];
+  const passes = [folded, demoteInvalidJsonEscapes(folded)];
   for (const [pass, candidate] of passes.entries()) {
     try {
       const text = JSON.parse(`"${candidate}"`) as string;

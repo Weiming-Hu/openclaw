@@ -611,11 +611,13 @@ describe("generateVoiceResponse", () => {
     expect(paragraphs.text).toBe("Block one. Still one. Block two. Still two.");
   });
 
-  it("speaks the whole reply when an undecodable block precedes a valid one", async () => {
+  it("salvages an undecodable spoken block and defers an unscannable one", async () => {
     const undecodable = '{"spoken":"Broken \\q block."}{"spoken":"Valid block."}';
     const unscannable = '{"spoken":"Unscannable \\\nblock."}{"spoken":"Valid tail."}';
+    const pairedEscapes = '{"spoken":"Path C:\\\\qa and a \\z tail."}';
     const { result: salvaged } = await runGenerateVoiceResponse([{ text: undecodable }]);
     const { result: deferred } = await runGenerateVoiceResponse([{ text: unscannable }]);
+    const { result: paired } = await runGenerateVoiceResponse([{ text: pairedEscapes }]);
 
     // Baseline returned only "Valid block.": the first block failed to decode,
     // was skipped, and the later valid block concealed the omission.
@@ -623,6 +625,10 @@ describe("generateVoiceResponse", () => {
     // A declared block the scanner cannot match at all defers the whole reply to
     // the plain-text path, punctuation and all, rather than the tail alone.
     expect(deferred.text).toBe('{"spoken":"Unscannable \\ block."}{"spoken":"Valid tail."}');
+    // A valid escaped backslash pair survives the lenient pass. Baseline matched
+    // the pair's second backslash, rewrote it, left a lone invalid escape, and
+    // spoke this whole reply aloud as raw JSON.
+    expect(paired.text).toBe("Path C:\\qa and a z tail.");
   });
 
   it("returns silence for an explicit empty spoken contract response", async () => {

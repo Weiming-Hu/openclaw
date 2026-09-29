@@ -5,7 +5,24 @@
 import { extractErrorCode } from "@openclaw/normalization-core/error-coercion";
 import type { DedupeCache } from "../infra/dedupe.js";
 import { formatConfigIssueLines } from "./issue-format.js";
-import type { ConfigValidationIssue } from "./types.js";
+import type { ConfigFileSnapshot, ConfigValidationIssue } from "./types.js";
+
+/** Read failures do not establish that authored configuration needs repair. */
+export function isConfigReadFailure(
+  snapshot: Pick<ConfigFileSnapshot, "issues" | "readError">,
+): boolean {
+  return Boolean(
+    snapshot.readError || snapshot.issues.some((issue) => issue.errorCode === "CONFIG_READ_FAILED"),
+  );
+}
+
+export function configFailureHeading(
+  snapshot: Pick<ConfigFileSnapshot, "issues" | "readError">,
+): string {
+  return isConfigReadFailure(snapshot)
+    ? "OpenClaw config could not be read"
+    : "OpenClaw config is invalid";
+}
 
 /** Formats validation issues as terminal-safe bullet lines for config load failures. */
 export function formatInvalidConfigDetails(issues: ConfigValidationIssue[]): string {
@@ -41,6 +58,13 @@ export function isInvalidConfigError(err: unknown): err is InvalidConfigError {
 
 export function isDoctorRecoverableInvalidConfigError(err: unknown): boolean {
   return isInvalidConfigError(err) && err.recovery !== "manual";
+}
+
+/** An unavailable read cannot establish invalid authored settings or authorize Doctor repair. */
+export function createConfigReadError(configPath: string, details: string): Error {
+  return Object.assign(new Error(`Config could not be read at ${configPath}:\n${details}`), {
+    code: "CONFIG_READ_FAILED",
+  });
 }
 
 /** Logs and throws the standard invalid-config error for a validation result. */

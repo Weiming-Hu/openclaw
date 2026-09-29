@@ -45,12 +45,10 @@ import {
 import { validateReusableReleaseChild } from "../../scripts/lib/full-release-child-reuse.mjs";
 import { FULL_RELEASE_CHILD_EVIDENCE_JOB } from "../../scripts/lib/full-release-evidence.mjs";
 import {
-  artifactDownloadArgs,
   artifactDownloadTimeoutMs,
   createReleaseEvidenceClient,
   expectedChildDispatches,
   expectedSelectedChildDispatches,
-  githubRestArgs,
   manifestChildEntries,
   readManifestArtifactArchive,
   requiredChildKeysForRerunGroup,
@@ -1029,17 +1027,6 @@ process.stdout.write(JSON.stringify(restored.plan));
 });
 
 describe("GitHub API commands", () => {
-  it("delegates authentication to gh for REST and artifact requests", () => {
-    expect(githubRestArgs("actions/runs/123", "owner/repo")).toEqual([
-      "api",
-      "repos/owner/repo/actions/runs/123",
-    ]);
-    expect(artifactDownloadArgs(456, "owner/repo")).toEqual([
-      "api",
-      "repos/owner/repo/actions/artifacts/456/zip",
-    ]);
-  });
-
   it("budgets large artifact downloads for a conservative transfer rate", () => {
     expect(artifactDownloadTimeoutMs(55 * 1024 * 1024)).toBeGreaterThan(60_000);
     expect(artifactDownloadTimeoutMs(245 * 1024 * 1024)).toBeGreaterThan(15 * 60_000);
@@ -1383,21 +1370,6 @@ describe("runReleaseCiGh", () => {
         timeout: 60_000,
       }),
     );
-  });
-
-  it("propagates GitHub lookup timeouts", () => {
-    const wait = vi.spyOn(Atomics, "wait").mockReturnValue("timed-out");
-    const timeoutError = Object.assign(new Error("spawnSync gh ETIMEDOUT"), {
-      code: "ETIMEDOUT",
-    });
-    expect(() =>
-      runReleaseCiGh(["api", "rate_limit"], {
-        execFileSyncImpl: () => {
-          throw timeoutError;
-        },
-      }),
-    ).toThrow(timeoutError);
-    wait.mockRestore();
   });
 });
 
@@ -3668,6 +3640,105 @@ describe("release CI summary child correlation", () => {
     ).rejects.toThrow("does not pass release policy");
   });
 
+  it.each(["valid", "macos-failure", "cancelled-run", "forged-advisory", "omitted-advisory"])(
+    "authenticates Windows Node CI advisory evidence: %s",
+    async (scenario) => {
+      const fixture = trustedMainNpmFixture();
+      const selected = expectDefined(
+        fixture.executionPlan.children.find((child) => child.key === "normalCi"),
+        "normal CI child",
+      );
+      const run = expectDefined(
+        fixture.runs.find((candidate) => String(candidate.id) === selected.runId),
+        "normal CI run",
+      );
+      run.conclusion = scenario === "cancelled-run" ? "cancelled" : "failure";
+      const windowsJob = {
+        ...fixture.parentJob,
+        name: "checks-windows-node-test-2",
+        conclusion: "failure",
+        html_url: `https://github.com/openclaw/openclaw/actions/runs/${selected.runId}/job/501`,
+      };
+      const jobs = [
+        windowsJob,
+        { ...fixture.parentJob, name: "openclaw/ci-gate" },
+        ...(scenario === "macos-failure"
+          ? [{ ...fixture.parentJob, name: "macos-node-2", conclusion: "failure" }]
+          : []),
+      ];
+      const composite = composeReleaseAttemptJobs([{ jobs, runAttempt: 1 }], {
+        effectiveRunAttempt: 1,
+        plannedRunAttempt: 1,
+      });
+      Object.assign(expectDefined(fixture.manifest.childEvidence.normalCi, "normal CI evidence"), {
+        jobs: composite.jobs,
+        compositeJobsSha256: composite.sha256,
+      });
+      const originalJobs = expectDefined(
+        fixture.client.getRunAttemptJobs.getMockImplementation(),
+        "live job reader",
+      );
+      fixture.client.getRunAttemptJobs.mockImplementation((runId) =>
+        runId === selected.runId ? jobs : originalJobs(runId),
+      );
+      const advisory = {
+        class: "windows-node-ci",
+        child: "normalCi",
+        job: windowsJob.name,
+        conclusion: "failure",
+        runId: selected.runId,
+        url: windowsJob.html_url,
+      };
+      if (scenario !== "omitted-advisory") {
+        Object.assign(fixture.manifest, {
+          advisoryJobs: [
+            scenario === "forged-advisory"
+              ? { ...advisory, child: "releaseChecksCandidate" }
+              : advisory,
+          ],
+        });
+      }
+      const validation = validateReleaseRunEvidence(
+        {
+          repository: "openclaw/openclaw",
+          runId: fixture.runId,
+          verifierSourceContent: readFileSync(SCRIPT),
+          verifierSourceSha: "c".repeat(40),
+        },
+        fixture.client,
+      );
+      if (scenario === "valid") {
+        const evidence = await validation;
+        expect(evidence.valid).toBe(true);
+        expect(evidence.conclusions.allRequiredSucceeded).toBe(true);
+        expect(evidence.children).toContainEqual(
+          expect.objectContaining({
+            role: "normalCi",
+            conclusion: "failure",
+            policyPassed: true,
+            advisoryJobs: [advisory],
+          }),
+        );
+        expect(evidence.current.manifest).toMatchObject({
+          advisoryJobs: [advisory],
+          childEvidence: {
+            normalCi: {
+              jobs: expect.arrayContaining([
+                expect.objectContaining({ name: windowsJob.name, conclusion: "failure" }),
+              ]),
+            },
+          },
+        });
+      } else {
+        await expect(validation).rejects.toThrow(
+          scenario === "forged-advisory" || scenario === "omitted-advisory"
+            ? /windows-node-ci/u
+            : /does not pass release policy/u,
+        );
+      }
+    },
+  );
+
   it.each(["", "ship"])(
     "reads published empty retry metadata without granting a waiver (%s)",
     async (laneWaiver) => {
@@ -3735,7 +3806,7 @@ describe("release CI summary child correlation", () => {
       });
       const before = JSON.stringify(manifest);
       expect(() => validateParentManifest(manifest, { runId: fixture.runId })).toThrow(
-        "no longer accepted",
+        laneWaiver ? "no longer accepted" : "windows-node-ci",
       );
       await expect(
         validateReleaseRunEvidence(

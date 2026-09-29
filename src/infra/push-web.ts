@@ -15,7 +15,6 @@ import {
   insertVapidKeyPairIfAbsent,
   isValidWebPushEndpoint,
   isValidWebPushKey,
-  listBoundWebPushSubscriptions,
   listWebPushSubscriptions,
   withWebPushSubscriptions,
   readPersistedVapidKeyPair,
@@ -45,7 +44,6 @@ type WebPushDeliveryOptions = Pick<
 
 export {
   WebPushSubscriptionBindingError,
-  listBoundWebPushSubscriptions,
   hasBoundWebPushSubscriptions,
   setWebPushSubscriptionPreferences,
 };
@@ -109,7 +107,6 @@ export async function resolveVapidKeys(baseDir?: string): Promise<VapidKeyPair> 
       keys.privateKey,
       resolveVapidSubjectFromEnv(),
     ),
-    nowMs: Date.now(),
     stateDir: baseDir,
   });
   return { ...pair, subject: resolveVapidSubjectFromEnv() };

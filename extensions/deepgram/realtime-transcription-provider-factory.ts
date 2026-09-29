@@ -373,21 +373,15 @@ function createDeepgramRealtimeTranscriptionSession(
         if (!text) {
           return;
         }
-        if (event.is_final) {
-          const nextFinalized = joinTranscript(finalizedTranscript, text);
-          if (!updateTurn(nextFinalized, "", transport)) {
-            return;
-          }
-          armIdleFinalize(transport, nextFinalized);
-          config.onPartial?.(nextFinalized);
-        } else {
-          if (!updateTurn(finalizedTranscript, text, transport)) {
-            return;
-          }
-          const effective = joinTranscript(finalizedTranscript, text);
-          armIdleFinalize(transport, effective);
-          config.onPartial?.(effective);
+        const nextFinalized = event.is_final
+          ? joinTranscript(finalizedTranscript, text)
+          : finalizedTranscript;
+        if (!updateTurn(nextFinalized, event.is_final ? "" : text, transport)) {
+          return;
         }
+        const effective = event.is_final ? nextFinalized : joinTranscript(nextFinalized, text);
+        armIdleFinalize(transport, effective);
+        config.onPartial?.(effective);
         return;
       }
       case "SpeechStarted":

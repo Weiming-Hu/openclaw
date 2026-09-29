@@ -449,6 +449,53 @@ describe("buildDeepgramRealtimeTranscriptionProvider", () => {
     }
   });
 
+  it("still finalizes when the provider repeats one interim transcript forever", async () => {
+    vi.useFakeTimers();
+    let finalizeRequests = 0;
+    const server = await createDeepgramRealtimeServer({
+      onConnection: (ws) => {
+        // Deepgram repeats the same interim transcript with no terminal signal,
+        // each repeat landing inside the idle window. The transcript stopped
+        // growing, so these repeats must not postpone the backstop.
+        const repeat = () => {
+          if (ws.readyState !== ws.OPEN) {
+            return;
+          }
+          sendResult(ws, { text: "stalled question" });
+          setTimeout(repeat, 25);
+        };
+        repeat();
+        ws.on("message", (data) => {
+          if (parseClientMessage(data).type === "Finalize") {
+            finalizeRequests += 1;
+          }
+        });
+      },
+    });
+    const onTranscript = vi.fn();
+    const session = provider.createSession({
+      providerConfig: {
+        apiKey: "***",
+        baseUrl: server.baseUrl,
+        endpointingMs: 25,
+        idleFlushMs: 50,
+      },
+      onPartial: vi.fn(),
+      onTranscript,
+    });
+
+    try {
+      await session.connect();
+      // The repeats never stop, so a timer rearmed by every nonempty event
+      // would never fire and this would time out.
+      await vi.waitFor(() => expect(finalizeRequests).toBeGreaterThanOrEqual(1));
+      // The provider never answered, so the turn is still its to end.
+      expect(onTranscript).not.toHaveBeenCalled();
+    } finally {
+      session.close();
+    }
+  });
+
   it("lets provider endpointing win before the idle finalize request", async () => {
     vi.useFakeTimers();
     let finalizeRequests = 0;

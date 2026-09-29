@@ -198,7 +198,10 @@ function createDeepgramRealtimeTranscriptionSession(
   let finalizeFallbackTimer: ReturnType<typeof setTimeout> | undefined;
   let idleFinalizeTimer: ReturnType<typeof setTimeout> | undefined;
   let idleFinalizeRecoveryTimer: ReturnType<typeof setTimeout> | undefined;
-  let idleFinalizeSent = false;
+  // Effective transcript the idle backstop is already covering, either with a
+  // pending timer or with a request already sent for it. Only text that moves
+  // past this value may restart the timer.
+  let idleFinalizeTranscript: string | undefined;
   let openedOnce = false;
 
   const collapseWhitespace = (value: string) => value.replace(/\s+/g, " ").trim();
@@ -247,10 +250,22 @@ function createDeepgramRealtimeTranscriptionSession(
    * existing terminal path commits. Turn completion stays provider-authoritative,
    * and a gap between provisional results never commits anything on its own.
    */
-  const armIdleFinalize = (transport: RealtimeTranscriptionWebSocketTransport) => {
-    if (config.idleFlushMs <= 0 || idleFinalizeSent) {
+  const armIdleFinalize = (
+    transport: RealtimeTranscriptionWebSocketTransport,
+    effectiveTranscript: string,
+  ) => {
+    if (config.idleFlushMs <= 0) {
       return;
     }
+    // Only a transcript that moved may postpone the request. Deepgram can
+    // repeat the same nonterminal Results indefinitely, and re-arming on those
+    // repeats would push the backstop out forever - reproducing the very stall
+    // it exists to break. A repeat therefore leaves the pending timer, and any
+    // request already sent for this text, exactly as they are.
+    if (effectiveTranscript === idleFinalizeTranscript) {
+      return;
+    }
+    idleFinalizeTranscript = effectiveTranscript;
     clearIdleFinalize();
     idleFinalizeTimer = setTimeout(() => {
       idleFinalizeTimer = undefined;
@@ -270,21 +285,20 @@ function createDeepgramRealtimeTranscriptionSession(
         reportIdleFinalizeError(error);
       }
       if (!requestSent) {
-        idleFinalizeSent = false;
+        idleFinalizeTranscript = undefined;
         return;
       }
-      idleFinalizeSent = true;
       // Deepgram may answer a Finalize with no Results event at all. Committing
       // here would invent a turn boundary the provider never gave: an
       // `is_final` segment is confirmed text, not a completed utterance, and
       // only `speech_final` or `from_finalize` ends a turn. While the call is
       // open the turn therefore stays pending; the unanswered request is
-      // surfaced as a recoverable failure and the cleared flag lets a later
-      // Results event ask again. The close path still preserves confirmed text
-      // at hangup.
+      // surfaced as a recoverable failure and the cleared coverage marker lets
+      // a later Results event ask again. The close path still preserves
+      // confirmed text at hangup.
       idleFinalizeRecoveryTimer = setTimeout(() => {
         idleFinalizeRecoveryTimer = undefined;
-        idleFinalizeSent = false;
+        idleFinalizeTranscript = undefined;
         if (!finalizedTranscript && !pendingPartial) {
           return;
         }
@@ -296,7 +310,7 @@ function createDeepgramRealtimeTranscriptionSession(
   const clearTurn = () => {
     clearFinalizeFallback();
     clearIdleFinalize();
-    idleFinalizeSent = false;
+    idleFinalizeTranscript = undefined;
     finalizedTranscript = "";
     pendingPartial = "";
     speechStarted = false;
@@ -364,16 +378,15 @@ function createDeepgramRealtimeTranscriptionSession(
           if (!updateTurn(nextFinalized, "", transport)) {
             return;
           }
-          idleFinalizeSent = false;
-          armIdleFinalize(transport);
+          armIdleFinalize(transport, nextFinalized);
           config.onPartial?.(nextFinalized);
         } else {
           if (!updateTurn(finalizedTranscript, text, transport)) {
             return;
           }
-          idleFinalizeSent = false;
-          armIdleFinalize(transport);
-          config.onPartial?.(joinTranscript(finalizedTranscript, text));
+          const effective = joinTranscript(finalizedTranscript, text);
+          armIdleFinalize(transport, effective);
+          config.onPartial?.(effective);
         }
         return;
       }
@@ -415,7 +428,7 @@ function createDeepgramRealtimeTranscriptionSession(
       }
       finalizeRequested = false;
       finalizeFallbackFired = false;
-      idleFinalizeSent = false;
+      idleFinalizeTranscript = undefined;
     },
     sendAudio: (audio, transport) => {
       transport.sendBinary(audio);
